@@ -1,0 +1,119 @@
+version: '3.8'
+
+services:
+  # PostgreSQL with pgvector extension
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: rag-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: vectordb
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./pg-vector/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d vectordb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - rag-network
+
+  # pgAdmin for database management (optional)
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: rag-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+    networks:
+      - rag-network
+
+  # Ollama LLM and Embeddings Service
+  # Note: This requires Ollama to be installed on your machine
+  # For Docker, use: ollama/ollama image (requires GPU support)
+  # Uncomment below if running Ollama in Docker
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   container_name: rag-ollama
+  #   ports:
+  #     - "11434:11434"
+  #   environment:
+  #     OLLAMA_HOST: 0.0.0.0:11434
+  #   volumes:
+  #     - ollama_data:/root/.ollama
+  #   networks:
+  #     - rag-network
+  #   # GPU support (uncomment if you have NVIDIA GPU)
+  #   # deploy:
+  #   #   resources:
+  #   #     reservations:
+  #   #       devices:
+  #   #         - driver: nvidia
+  #   #           count: 1
+  #   #           capabilities: [gpu]
+
+  # RAG Application
+  rag-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rag-app
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: development
+      API_PORT: 3000
+      VECTOR_STORE: vectorDB
+      
+      # Database Configuration
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: vectordb
+      
+      # Ollama Configuration
+      # If running Ollama in Docker, use service name 'ollama'
+      # If running on host machine, use 'host.docker.internal:11434' on Mac/Windows
+      # or the actual host IP on Linux
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      OLLAMA_HOST: http://host.docker.internal:11434
+      OLLAMA_MODEL: llama3
+      OLLAMA_EMBEDDING_MODEL: nomic-embed-text
+      OLLAMA_TEMPERATURE: 0.7
+      
+      # LangChain Configuration
+      LANGCHAIN_MODEL: llama3
+      LANGCHAIN_EMBEDDING_MODEL: nomic-embed-text
+      LANGCHAIN_TEMPERATURE: 0.7
+      LANGCHAIN_TOP_K: 2
+      
+      # Logging
+      LOG_LEVEL: debug
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./embeddings/docs:/app/embeddings/docs
+    networks:
+      - rag-network
+    # Uncomment to rebuild image on container start
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+
+networks:
+  rag-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  ollama_data:
