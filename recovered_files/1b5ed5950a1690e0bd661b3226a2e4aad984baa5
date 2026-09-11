@@ -1,0 +1,1225 @@
+# AWS ECS Fargate Deployment Guide for RAG Application
+
+This guide provides detailed step-by-step instructions and AWS CLI commands to deploy your RAG application to AWS ECS Fargate.
+
+---
+
+## Table of Contents
+
+1. [Prerequisites](#prerequisites)
+2. [Phase 1: AWS Infrastructure Setup](#phase-1-aws-infrastructure-setup)
+3. [Phase 2: Local Testing](#phase-2-local-testing)
+4. [Phase 3: Container Registry & Image Management](#phase-3-container-registry--image-management)
+5. [Phase 4: Ollama Deployment](#phase-4-ollama-deployment)
+6. [Phase 5: ECS Cluster & Service Deployment](#phase-5-ecs-cluster--service-deployment)
+7. [Phase 6: Database Initialization](#phase-6-database-initialization)
+8. [Phase 7: Testing & Validation](#phase-7-testing--validation)
+9. [Phase 8: Monitoring](#phase-8-monitoring)
+10. [Cleanup](#cleanup)
+
+---
+
+## Prerequisites
+
+### Local Setup
+- AWS CLI v2 installed and configured (`aws configure`)
+- Docker Desktop installed
+- Node.js 18+ installed
+- Git installed
+- AWS account with appropriate permissions
+
+### AWS Permissions Required
+Your AWS IAM user/role needs permissions for:
+- EC2 (VPC, Security Groups, Instances)
+- RDS (PostgreSQL)
+- ECR (Elastic Container Registry)
+- ECS (Fargate, Tasks, Services)
+- CloudWatch (Logs, Metrics)
+- IAM (Roles, Policies)
+- ALB (Application Load Balancer)
+
+### Variables to Set
+Replace these values throughout the guide:
+```bash
+AWS_REGION=ap-south-1
+AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+APP_NAME=rag
+ECR_REPO_NAME=rag-app
+CLUSTER_NAME=rag-cluster
+VPC_CIDR=10.0.0.0/16
+PRIVATE_SUBNET_1_CIDR=10.0.1.0/24
+PRIVATE_SUBNET_2_CIDR=10.0.2.0/24
+PUBLIC_SUBNET_1_CIDR=10.0.10.0/24
+PUBLIC_SUBNET_2_CIDR=10.0.11.0/24
+```
+
+---
+
+## Phase 1: AWS Infrastructure Setup
+
+### Step 1: Create VPC
+
+```bash
+# Create VPC
+VPC_ID=$(aws ec2 create-vpc \
+  --cidr-block $VPC_CIDR \
+  --tag-specifications 'ResourceType=vpc,Tags=[{Key=Name,Value=rag-vpc}]' \
+  --region $AWS_REGION \
+  --query 'Vpc.VpcId' \
+  --output text)
+
+echo "VPC ID: $VPC_ID"
+
+# Enable DNS hostnames
+aws ec2 modify-vpc-attribute \
+  --vpc-id $VPC_ID \
+  --enable-dns-hostnames \
+  --region $AWS_REGION
+
+
+aws ec2 modify-vpc-attribute \
+  --vpc-id $VPC_ID \
+  --enable-dns-support \
+  --region $AWS_REGION
+```
+
+### Step 2: Create Subnets
+
+```bash
+# Create Private Subnet 1
+PRIVATE_SUBNET_1=$(aws ec2 create-subnet \
+  --vpc-id $VPC_ID \
+  --cidr-block $PRIVATE_SUBNET_1_CIDR \
+  --availability-zone ${AWS_REGION}a \
+  --tag-specifications 'ResourceType=subnet,Tags=[{Key=Name,Value=rag-private-subnet-1a}]' \
+  --region $AWS_REGION \
+  --query 'Subnet.SubnetId' \
+  --output text)
+
+echo "Private Subnet 1: $PRIVATE_SUBNET_1"
+
+# Create Private Subnet 2
+PRIVATE_SUBNET_2=$(aws ec2 create-subnet \
+  --vpc-id $VPC_ID \
+  --cidr-block $PRIVATE_SUBNET_2_CIDR \
+  --availability-zone ${AWS_REGION}b \
+  --tag-specifications 'ResourceType=subnet,Tags=[{Key=Name,Value=rag-private-subnet-1b}]' \
+  --region $AWS_REGION \
+  --query 'Subnet.SubnetId' \
+  --output text)
+
+echo "Private Subnet 2: $PRIVATE_SUBNET_2"
+
+# Create Public Subnet 1
+PUBLIC_SUBNET_1=$(aws ec2 create-subnet \
+  --vpc-id $VPC_ID \
+  --cidr-block $PUBLIC_SUBNET_1_CIDR \
+  --availability-zone ${AWS_REGION}a \
+  --tag-specifications 'ResourceType=subnet,Tags=[{Key=Name,Value=rag-public-subnet-1a}]' \
+  --region $AWS_REGION \
+  --query 'Subnet.SubnetId' \
+  --output text)
+
+echo "Public Subnet 1: $PUBLIC_SUBNET_1"
+
+# Create Public Subnet 2
+PUBLIC_SUBNET_2=$(aws ec2 create-subnet \
+  --vpc-id $VPC_ID \
+  --cidr-block $PUBLIC_SUBNET_2_CIDR \
+  --availability-zone ${AWS_REGION}b \
+  --tag-specifications 'ResourceType=subnet,Tags=[{Key=Name,Value=rag-public-subnet-1b}]' \
+  --region $AWS_REGION \
+  --query 'Subnet.SubnetId' \
+  --output text)
+
+echo "Public Subnet 2: $PUBLIC_SUBNET_2"
+```
+
+### Step 3: Create Internet Gateway & NAT Gateway
+
+```bash
+# Create Internet Gateway
+IGW_ID=$(aws ec2 create-internet-gateway \
+  --tag-specifications 'ResourceType=internet-gateway,Tags=[{Key=Name,Value=rag-igw}]' \
+  --region $AWS_REGION \
+  --query 'InternetGateway.InternetGatewayId' \
+  --output text)
+
+echo "Internet Gateway ID: $IGW_ID"
+
+# Attach IGW to VPC
+aws ec2 attach-internet-gateway \
+  --internet-gateway-id $IGW_ID \
+  --vpc-id $VPC_ID \
+  --region $AWS_REGION
+
+# Allocate Elastic IP for NAT Gateway
+ALLOCATION_ID=$(aws ec2 allocate-address \
+  --domain vpc \
+  --region $AWS_REGION \
+  --query 'AllocationId' \
+  --output text)
+
+echo "Elastic IP Allocation ID: $ALLOCATION_ID"
+
+# Create NAT Gateway in public subnet
+NAT_GW_ID=$(aws ec2 create-nat-gateway \
+  --subnet-id $PUBLIC_SUBNET_1 \
+  --allocation-id $ALLOCATION_ID \
+  --tag-specifications 'ResourceType=natgateway,Tags=[{Key=Name,Value=rag-nat}]' \
+  --region $AWS_REGION \
+  --query 'NatGateway.NatGatewayId' \
+  --output text)
+
+echo "NAT Gateway ID: $NAT_GW_ID"
+
+# Wait for NAT Gateway to be available
+aws ec2 wait nat-gateway-available \
+  --nat-gateway-ids $NAT_GW_ID \
+  --region $AWS_REGION
+```
+
+### Step 4: Create Route Tables
+
+```bash
+# Create Public Route Table
+PUBLIC_RT=$(aws ec2 create-route-table \
+  --vpc-id $VPC_ID \
+  --tag-specifications 'ResourceType=route-table,Tags=[{Key=Name,Value=rag-public-rt}]' \
+  --region $AWS_REGION \
+  --query 'RouteTable.RouteTableId' \
+  --output text)
+
+echo "Public Route Table: $PUBLIC_RT"
+
+# Add route to IGW
+aws ec2 create-route \
+  --route-table-id $PUBLIC_RT \
+  --destination-cidr-block 0.0.0.0/0 \
+  --gateway-id $IGW_ID \
+  --region $AWS_REGION
+
+# Associate public subnets with public route table
+aws ec2 associate-route-table \
+  --subnet-id $PUBLIC_SUBNET_1 \
+  --route-table-id $PUBLIC_RT \
+  --region $AWS_REGION
+
+aws ec2 associate-route-table \
+  --subnet-id $PUBLIC_SUBNET_2 \
+  --route-table-id $PUBLIC_RT \
+  --region $AWS_REGION
+
+# Create Private Route Table
+PRIVATE_RT=$(aws ec2 create-route-table \
+  --vpc-id $VPC_ID \
+  --tag-specifications 'ResourceType=route-table,Tags=[{Key=Name,Value=rag-private-rt}]' \
+  --region $AWS_REGION \
+  --query 'RouteTable.RouteTableId' \
+  --output text)
+
+echo "Private Route Table: $PRIVATE_RT"
+
+# Add route to NAT Gateway
+NAT_GW_IP=$(aws ec2 describe-nat-gateways \
+  --nat-gateway-ids $NAT_GW_ID \
+  --region $AWS_REGION \
+  --query 'NatGateways[0].NatGatewayId' \
+  --output text)
+
+aws ec2 create-route \
+  --route-table-id $PRIVATE_RT \
+  --destination-cidr-block 0.0.0.0/0 \
+  --nat-gateway-id $NAT_GW_ID \
+  --region $AWS_REGION
+
+# Associate private subnets with private route table
+aws ec2 associate-route-table \
+  --subnet-id $PRIVATE_SUBNET_1 \
+  --route-table-id $PRIVATE_RT \
+  --region $AWS_REGION
+
+aws ec2 associate-route-table \
+  --subnet-id $PRIVATE_SUBNET_2 \
+  --route-table-id $PRIVATE_RT \
+  --region $AWS_REGION
+```
+
+### Step 5: Create Security Groups
+
+```bash
+# Create RDS Security Group
+SG_RDS=$(aws ec2 create-security-group \
+  --group-name rag-rds-sg \
+  --description "Security group for RAG RDS PostgreSQL" \
+  --vpc-id $VPC_ID \
+  --region $AWS_REGION \
+  --query 'GroupId' \
+  --output text)
+
+echo "RDS Security Group: $SG_RDS"
+
+# Create Fargate Security Group
+SG_FARGATE=$(aws ec2 create-security-group \
+  --group-name rag-fargate-sg \
+  --description "Security group for RAG Fargate tasks" \
+  --vpc-id $VPC_ID \
+  --region $AWS_REGION \
+  --query 'GroupId' \
+  --output text)
+
+echo "Fargate Security Group: $SG_FARGATE"
+
+# Create ALB Security Group
+SG_ALB=$(aws ec2 create-security-group \
+  --group-name rag-alb-sg \
+  --description "Security group for RAG Application Load Balancer" \
+  --vpc-id $VPC_ID \
+  --region $AWS_REGION \
+  --query 'GroupId' \
+  --output text)
+
+echo "ALB Security Group: $SG_ALB"
+
+# Create Ollama Security Group
+SG_OLLAMA=$(aws ec2 create-security-group \
+  --group-name rag-ollama-sg \
+  --description "Security group for RAG Ollama EC2 instance" \
+  --vpc-id $VPC_ID \
+  --region $AWS_REGION \
+  --query 'GroupId' \
+  --output text)
+
+echo "Ollama Security Group: $SG_OLLAMA"
+
+# Configure SG_ALB - Allow HTTP from anywhere
+aws ec2 authorize-security-group-ingress \
+  --group-id $SG_ALB \
+  --protocol tcp \
+  --port 80 \
+  --cidr 0.0.0.0/0 \
+  --region $AWS_REGION
+
+# Configure SG_ALB - Allow HTTPS from anywhere (for future)
+aws ec2 authorize-security-group-ingress \
+  --group-id $SG_ALB \
+  --protocol tcp \
+  --port 443 \
+  --cidr 0.0.0.0/0 \
+  --region $AWS_REGION
+
+# Configure SG_FARGATE - Allow traffic from ALB
+aws ec2 authorize-security-group-ingress \
+  --group-id $SG_FARGATE \
+  --protocol tcp \
+  --port 3000 \
+  --source-group $SG_ALB \
+  --region $AWS_REGION
+
+# Configure SG_FARGATE - Allow traffic to RDS
+aws ec2 authorize-security-group-ingress \
+  --group-id $SG_RDS \
+  --protocol tcp \
+  --port 5432 \
+  --source-group $SG_FARGATE \
+  --region $AWS_REGION
+
+# Configure SG_OLLAMA - Allow traffic from Fargate
+aws ec2 authorize-security-group-ingress \
+  --group-id $SG_OLLAMA \
+  --protocol tcp \
+  --port 11434 \
+  --source-group $SG_FARGATE \
+  --region $AWS_REGION
+
+# Configure SG_OLLAMA - Allow SSH for management (restrict to your IP)
+aws ec2 authorize-security-group-ingress \
+  --group-id $SG_OLLAMA \
+  --protocol tcp \
+  --port 22 \
+  --cidr 0.0.0.0/0 \
+  --region $AWS_REGION
+```
+
+### Step 6: Create RDS PostgreSQL Instance
+
+```bash
+# Create RDS DB Subnet Group
+aws rds create-db-subnet-group \
+  --db-subnet-group-name rag-db-subnet-group \
+  --db-subnet-group-description "Subnet group for RAG RDS" \
+  --subnet-ids $PRIVATE_SUBNET_1 $PRIVATE_SUBNET_2 \
+  --region $AWS_REGION
+
+# Create RDS PostgreSQL instance with pgvector
+aws rds create-db-instance \
+  --db-instance-identifier rag-db-instance \
+  --db-instance-class db.t3.micro \
+  --engine postgres \
+  --master-username postgres \
+  --master-user-password 'StrongPass123!' \
+  --allocated-storage 20 \
+  --storage-type gp2 \
+  --vpc-security-group-ids $SG_RDS \
+  --db-subnet-group-name rag-db-subnet-group \
+  --no-publicly-accessible \
+  --backup-retention-period 0 \
+  --region $AWS_REGION
+
+# Wait for DB instance to be available (this takes ~5-10 minutes)
+echo "Waiting for RDS to be available (this may take 5-10 minutes)..."
+aws rds wait db-instance-available \
+  --db-instance-identifier rag-db-instance \
+  --region $AWS_REGION
+
+# Get RDS endpoint
+RDS_ENDPOINT=$(aws rds describe-db-instances \
+  --db-instance-identifier rag-db-instance \
+  --region $AWS_REGION \
+  --query 'DBInstances[0].Endpoint.Address' \
+  --output text)
+
+echo "RDS Endpoint: $RDS_ENDPOINT"
+```
+
+### Step 7: Create IAM Roles
+
+```bash
+# Create ECS Task Execution Role
+TRUST_POLICY='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+
+ECS_TASK_EXECUTION_ROLE=$(aws iam create-role \
+  --role-name rag-ecs-task-execution-role \
+  --assume-role-policy-document "$TRUST_POLICY" \
+  --query 'Role.Arn' \
+  --output text)
+
+echo "ECS Task Execution Role: $ECS_TASK_EXECUTION_ROLE"
+
+# Attach policies to execution role
+aws iam attach-role-policy \
+  --role-name rag-ecs-task-execution-role \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+# Create policy for ECR
+ECR_POLICY='{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ecr:GetAuthorizationToken",
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer"
+      ],
+      "Resource": "*"
+    }
+  ]
+}'
+
+aws iam put-role-policy \
+  --role-name rag-ecs-task-execution-role \
+  --policy-name ecr-access \
+  --policy-document "$ECR_POLICY"
+
+# Create ECS Task Role (for app to access resources)
+ECS_TASK_ROLE=$(aws iam create-role \
+  --role-name rag-ecs-task-role \
+  --assume-role-policy-document "$TRUST_POLICY" \
+  --query 'Role.Arn' \
+  --output text)
+
+echo "ECS Task Role: $ECS_TASK_ROLE"
+
+# Create CloudWatch Logs policy for task role
+LOGS_POLICY='{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "arn:aws:logs:*:*:*"
+    }
+  ]
+}'
+
+aws iam put-role-policy \
+  --role-name rag-ecs-task-role \
+  --policy-name cloudwatch-logs \
+  --policy-document "$LOGS_POLICY"
+```
+
+### Step 8: Create Application Load Balancer
+
+```bash
+# Create ALB
+ALB_ARN=$(aws elbv2 create-load-balancer \
+  --name rag-alb \
+  --subnets $PUBLIC_SUBNET_1 $PUBLIC_SUBNET_2 \
+  --security-groups $SG_ALB \
+  --scheme internet-facing \
+  --type application \
+  --ip-address-type ipv4 \
+  --region $AWS_REGION \
+  --query 'LoadBalancers[0].LoadBalancerArn' \
+  --output text)
+
+echo "ALB ARN: $ALB_ARN"
+
+# Get ALB DNS name
+ALB_DNS=$(aws elbv2 describe-load-balancers \
+  --load-balancer-arns $ALB_ARN \
+  --region $AWS_REGION \
+  --query 'LoadBalancers[0].DNSName' \
+  --output text)
+
+echo "ALB DNS: $ALB_DNS"
+
+# Create target group
+TG_ARN=$(aws elbv2 create-target-group \
+  --name rag-tg \
+  --protocol HTTP \
+  --port 3000 \
+  --vpc-id $VPC_ID \
+  --target-type ip \
+  --health-check-path /health \
+  --health-check-interval-seconds 30 \
+  --health-check-timeout-seconds 5 \
+  --healthy-threshold-count 2 \
+  --unhealthy-threshold-count 2 \
+  --region $AWS_REGION \
+  --query 'TargetGroups[0].TargetGroupArn' \
+  --output text)
+
+echo "Target Group ARN: $TG_ARN"
+
+# Create listener
+aws elbv2 create-listener \
+  --load-balancer-arn $ALB_ARN \
+  --protocol HTTP \
+  --port 80 \
+  --default-actions Type=forward,TargetGroupArn=$TG_ARN \
+  --region $AWS_REGION
+```
+
+---
+
+## Phase 2: Local Testing
+
+### Step 9: Build and Test Docker Image Locally
+
+```bash
+# Navigate to RAG directory
+cd RAG
+
+# Build Docker image
+docker build -t rag-app:latest .
+
+# Run docker-compose for local testing
+docker-compose -f docker-compose-aws.yml up -d
+
+# Wait for services to start
+sleep 10
+
+# Test health endpoint
+curl http://localhost:3000/health
+
+# Test API endpoint
+curl -X POST http://localhost:3000/api/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question":"What is the surrender policy?"}'
+
+# View logs
+docker-compose -f docker-compose-aws.yml logs -f rag-app
+
+# Cleanup
+docker-compose -f docker-compose-aws.yml down
+```
+
+---
+
+## Phase 3: Container Registry & Image Management
+
+### Step 10: Create ECR Repository
+
+```bash
+# Create ECR repository
+ECR_REPO=$(aws ecr create-repository \
+  --repository-name $ECR_REPO_NAME \
+  --image-scanning-configuration scanOnPush=true \
+  --encryption-configuration encryptionType=AES256 \
+  --region $AWS_REGION \
+  --query 'repository.repositoryUri' \
+  --output text)
+
+echo "ECR Repository: $ECR_REPO"
+
+# Set repository URI variable
+REPO_URI=$ECR_REPO
+```
+
+### Step 11: Push Docker Image to ECR
+
+```bash
+# Get ECR login token
+aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $REPO_URI
+
+# Build image with version tag
+docker build -t rag-app:v1.0 .
+
+# Tag for ECR
+docker tag rag-app:v1.0 $REPO_URI:v1.0
+docker tag rag-app:v1.0 $REPO_URI:latest
+
+# Push to ECR
+docker push $REPO_URI:v1.0
+docker push $REPO_URI:latest
+
+# Verify image in ECR
+aws ecr describe-images \
+  --repository-name $ECR_REPO_NAME \
+  --region $AWS_REGION
+```
+
+---
+
+## Phase 4: Ollama Deployment
+
+### Option A: Self-Hosted Ollama on EC2
+
+#### Step 12A: Launch EC2 Instance
+
+```bash
+# Get latest Ubuntu 22.04 LTS AMI
+AMI_ID=$(aws ec2 describe-images \
+  --owners 099720109477 \
+  --filters "Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*" \
+  "Name=state,Values=available" \
+  --region $AWS_REGION \
+  --query 'Images | sort_by(@, &CreationDate) | [-1].ImageId' \
+  --output text)
+
+echo "Ubuntu AMI: $AMI_ID"
+
+# Create EC2 key pair (save the .pem file securely)
+aws ec2 create-key-pair \
+  --key-name rag-ollama-key \
+  --region $AWS_REGION \
+  --query 'KeyMaterial' \
+  --output text > ~/.ssh/rag-ollama-key.pem
+
+chmod 400 ~/.ssh/rag-ollama-key.pem
+
+# Launch EC2 instance
+INSTANCE_ID=$(aws ec2 run-instances \
+  --image-id $AMI_ID \
+  --instance-type t3.micro \
+  --key-name rag-ollama-key \
+  --security-group-ids $SG_OLLAMA \
+  --subnet-id $PUBLIC_SUBNET_1 \
+  --associate-public-ip-address \
+  --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=30,VolumeType=gp2,DeleteOnTermination=true}' \
+  --region $AWS_REGION \
+  --query 'Instances[0].InstanceId' \
+  --output text)
+
+echo "Instance ID: $INSTANCE_ID"
+
+# Wait for instance to be running
+aws ec2 wait instance-running \
+  --instance-ids $INSTANCE_ID \
+  --region $AWS_REGION
+
+# Get instance IP addresses
+INSTANCE_IP=$(aws ec2 describe-instances \
+  --instance-ids $INSTANCE_ID \
+  --region $AWS_REGION \
+  --query 'Reservations[0].Instances[0].PublicIpAddress' \
+  --output text)
+
+INSTANCE_PRIVATE_IP=$(aws ec2 describe-instances \
+  --instance-ids $INSTANCE_ID \
+  --region $AWS_REGION \
+  --query 'Reservations[0].Instances[0].PrivateIpAddress' \
+  --output text)
+
+echo "Instance Public IP: $INSTANCE_IP"
+echo "Instance Private IP: $INSTANCE_PRIVATE_IP"
+```
+
+#### Step 13A: Install Ollama on EC2
+
+```bash
+# SSH into the instance
+ssh -i ~/.ssh/rag-ollama-key.pem ubuntu@$INSTANCE_IP
+
+# Once connected, run these commands:
+
+# Update system
+sudo apt update && sudo apt upgrade -y
+
+# Install Ollama
+curl https://ollama.ai/install.sh | sh
+
+# Start Ollama service
+sudo systemctl start ollama
+sudo systemctl enable ollama
+
+# Verify Ollama is running
+curl http://localhost:11434/api/version
+
+# Pull models (this will take several minutes)
+ollama pull llama3
+ollama pull nomic-embed-text
+
+# Configure Ollama to listen on all interfaces
+sudo tee /etc/systemd/system/ollama.service.d/override.conf << EOF
+[Service]
+Environment="OLLAMA_HOST=0.0.0.0:11434"
+EOF
+
+# Restart Ollama service
+sudo systemctl daemon-reload
+sudo systemctl restart ollama
+
+# Verify Ollama is accessible
+curl http://localhost:11434/api/tags
+
+# Exit SSH
+exit
+```
+
+#### Verify Ollama Connection from Local Machine
+
+```bash
+# Test connection to Ollama from your local machine
+curl http://$INSTANCE_IP:11434/api/version
+
+# Note: You should only be able to do this from your IP if security group allows it
+# For production, restrict SSH and Ollama access to specific IPs
+```
+
+### Option B: Use AWS Bedrock API (Simpler, Serverless)
+
+```bash
+# Update .env.aws to use Bedrock instead of Ollama
+# No EC2 instance needed - Bedrock is a managed service
+
+# Modify code to use Bedrock
+# (Requires code changes to use @aws-sdk/client-bedrock-runtime)
+```
+
+---
+
+## Phase 5: ECS Cluster & Service Deployment
+
+### Step 14: Create ECS Cluster
+
+```bash
+# Create ECS cluster
+aws ecs create-cluster \
+  --cluster-name $CLUSTER_NAME \
+  --region $AWS_REGION
+
+echo "Cluster created: $CLUSTER_NAME"
+
+# Attach Fargate capacity providers
+aws ecs put-cluster-capacity-providers \
+  --cluster $CLUSTER_NAME \
+  --capacity-providers FARGATE FARGATE_SPOT \
+  --default-capacity-provider-strategy capacityProvider=FARGATE,weight=1 \
+  --region $AWS_REGION
+
+# Create CloudWatch Log Group
+aws logs create-log-group \
+  --log-group-name /ecs/rag-app \
+  --region $AWS_REGION 2>/dev/null || true
+```
+
+### Step 15: Create ECS Task Definition
+
+```bash
+# Create task definition JSON
+cat > task-definition.json << EOF
+{
+  "family": "rag-app",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "${ECS_TASK_EXECUTION_ROLE}",
+  "taskRoleArn": "${ECS_TASK_ROLE}",
+  "containerDefinitions": [
+    {
+      "name": "rag-app",
+      "image": "${REPO_URI}:latest",
+      "portMappings": [
+        {
+          "containerPort": 3000,
+          "hostPort": 3000,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {
+          "name": "NODE_ENV",
+          "value": "production"
+        },
+        {
+          "name": "API_PORT",
+          "value": "3000"
+        },
+        {
+          "name": "VECTOR_STORE",
+          "value": "vectorDB"
+        },
+        {
+          "name": "DB_HOST",
+          "value": "${RDS_ENDPOINT}"
+        },
+        {
+          "name": "DB_PORT",
+          "value": "5432"
+        },
+        {
+          "name": "DB_USER",
+          "value": "postgres"
+        },
+        {
+          "name": "DB_PASSWORD",
+          "value": "ChangeMe123!@#"
+        },
+        {
+          "name": "DB_NAME",
+          "value": "vectordb"
+        },
+        {
+          "name": "OLLAMA_BASE_URL",
+          "value": "http://${INSTANCE_PRIVATE_IP}:11434"
+        },
+        {
+          "name": "OLLAMA_MODEL",
+          "value": "llama3"
+        },
+        {
+          "name": "OLLAMA_EMBEDDING_MODEL",
+          "value": "nomic-embed-text"
+        },
+        {
+          "name": "OLLAMA_TEMPERATURE",
+          "value": "0.7"
+        },
+        {
+          "name": "LOG_LEVEL",
+          "value": "info"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/rag-app",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -f http://localhost:3000/health || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 60
+      }
+    }
+  ]
+}
+EOF
+
+# Replace variables in task definition
+sed -i.bak "s|\${REPO_URI}|${REPO_URI}|g" task-definition.json
+sed -i.bak "s|\${ECS_TASK_EXECUTION_ROLE}|${ECS_TASK_EXECUTION_ROLE}|g" task-definition.json
+sed -i.bak "s|\${ECS_TASK_ROLE}|${ECS_TASK_ROLE}|g" task-definition.json
+sed -i.bak "s|\${RDS_ENDPOINT}|${RDS_ENDPOINT}|g" task-definition.json
+sed -i.bak "s|\${INSTANCE_PRIVATE_IP}|${INSTANCE_PRIVATE_IP}|g" task-definition.json
+sed -i.bak "s|\${AWS_REGION}|${AWS_REGION}|g" task-definition.json
+
+# Register task definition
+TASK_DEF_ARN=$(aws ecs register-task-definition \
+  --cli-input-json file://task-definition.json \
+  --region $AWS_REGION \
+  --query 'taskDefinition.taskDefinitionArn' \
+  --output text)
+
+echo "Task Definition ARN: $TASK_DEF_ARN"
+```
+
+### Step 16: Create ECS Service
+
+```bash
+# Create ECS service
+SERVICE_ARN=$(aws ecs create-service \
+  --cluster $CLUSTER_NAME \
+  --service-name rag-service \
+  --task-definition rag-app \
+  --desired-count 2 \
+  --launch-type FARGATE \
+  --network-configuration "awsvpcConfiguration={subnets=[$PRIVATE_SUBNET_1,$PRIVATE_SUBNET_2],securityGroups=[$SG_FARGATE],assignPublicIp=DISABLED}" \
+  --load-balancers targetGroupArn=$TG_ARN,containerName=rag-app,containerPort=3000 \
+  --scheduling-strategy REPLICA \
+  --region $AWS_REGION \
+  --query 'service.serviceArn' \
+  --output text)
+
+echo "Service ARN: $SERVICE_ARN"
+
+# Wait for service to stabilize (may take 2-3 minutes)
+echo "Waiting for service to stabilize..."
+aws ecs wait services-stable \
+  --cluster $CLUSTER_NAME \
+  --services rag-service \
+  --region $AWS_REGION
+
+# Check service status
+aws ecs describe-services \
+  --cluster $CLUSTER_NAME \
+  --services rag-service \
+  --region $AWS_REGION \
+  --query 'services[0].{Status:status,DesiredCount:desiredCount,RunningCount:runningCount}'
+```
+
+---
+
+## Phase 6: Database Initialization
+
+### Step 17: Initialize RDS Database
+
+```bash
+# Install PostgreSQL client if not already installed
+# macOS: brew install postgresql
+# Ubuntu/Debian: sudo apt-get install postgresql-client
+
+# Connect to RDS and run initialization SQL
+psql -h $RDS_ENDPOINT -U postgres -d postgres << 'SQL'
+CREATE DATABASE vectordb;
+\connect vectordb;
+
+-- Enable pgvector extension
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- Create tables
+CREATE TABLE IF NOT EXISTS documents (
+  id SERIAL PRIMARY KEY,
+  title VARCHAR(255) NOT NULL,
+  source VARCHAR(255),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS chunks (
+  id SERIAL PRIMARY KEY,
+  document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  chunk_index INTEGER NOT NULL,
+  content TEXT NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS embeddings (
+  id SERIAL PRIMARY KEY,
+  chunk_id INTEGER NOT NULL UNIQUE REFERENCES chunks(id) ON DELETE CASCADE,
+  embedding VECTOR(768),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create indexes
+CREATE INDEX IF NOT EXISTS idx_embeddings_vector ON embeddings USING ivfflat (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id);
+CREATE INDEX IF NOT EXISTS idx_documents_title ON documents(title);
+
+\q
+SQL
+
+echo "Database initialized successfully"
+```
+
+### Step 18: Seed Initial Documents
+
+```bash
+# Create a one-off ECS task to seed documents
+aws ecs run-task \
+  --cluster $CLUSTER_NAME \
+  --task-definition rag-app \
+  --launch-type FARGATE \
+  --network-configuration "awsvpcConfiguration={subnets=[$PRIVATE_SUBNET_1],securityGroups=[$SG_FARGATE]}" \
+  --container-overrides '[{
+    "name": "rag-app",
+    "command": ["node", "scripts/seed.js"]
+  }]' \
+  --region $AWS_REGION
+
+# Monitor task execution
+# Get task ID from output and check logs:
+aws logs tail /ecs/rag-app --follow --region $AWS_REGION
+```
+
+---
+
+## Phase 7: Testing & Validation
+
+### Step 19: Test Health Endpoint
+
+```bash
+# Get ALB DNS
+ALB_DNS=$(aws elbv2 describe-load-balancers \
+  --load-balancer-arns $ALB_ARN \
+  --region $AWS_REGION \
+  --query 'LoadBalancers[0].DNSName' \
+  --output text)
+
+echo "ALB DNS: $ALB_DNS"
+
+# Wait for ALB targets to become healthy (may take 1-2 minutes)
+sleep 30
+
+# Test health endpoint
+curl http://$ALB_DNS/health
+
+# Test API endpoint
+curl -X POST http://$ALB_DNS/api/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question":"What is the surrender policy?"}'
+```
+
+### Step 20: View Logs
+
+```bash
+# View ECS service logs
+aws logs tail /ecs/rag-app --follow --region $AWS_REGION
+
+# View service events
+aws ecs describe-services \
+  --cluster $CLUSTER_NAME \
+  --services rag-service \
+  --region $AWS_REGION \
+  --query 'services[0].events[0:5]'
+```
+
+### Step 21: End-to-End Testing
+
+```bash
+# Test with different questions
+curl -X POST http://$ALB_DNS/api/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question":"What is the annuity policy?"}'
+
+# Test retrieve endpoint
+curl -X POST http://$ALB_DNS/api/retrieve \
+  -H "Content-Type: application/json" \
+  -d '{"query":"policy", "topK": 3}'
+
+# Test root endpoint
+curl http://$ALB_DNS/
+```
+
+---
+
+## Phase 8: Monitoring
+
+### Step 22: Set Up CloudWatch Dashboards
+
+```bash
+# Create CloudWatch dashboard
+aws cloudwatch put-dashboard \
+  --dashboard-name rag-dashboard \
+  --dashboard-body file://dashboard-config.json \
+  --region $AWS_REGION
+
+# Create alarms
+# High CPU usage
+aws cloudwatch put-metric-alarm \
+  --alarm-name rag-high-cpu \
+  --alarm-description "Alert when ECS task CPU is high" \
+  --metric-name CPUUtilization \
+  --namespace AWS/ECS \
+  --statistic Average \
+  --period 300 \
+  --threshold 80 \
+  --comparison-operator GreaterThanThreshold \
+  --evaluation-periods 2 \
+  --region $AWS_REGION
+
+# ALB unhealthy targets
+aws cloudwatch put-metric-alarm \
+  --alarm-name rag-unhealthy-targets \
+  --alarm-description "Alert when ALB has unhealthy targets" \
+  --metric-name UnHealthyHostCount \
+  --namespace AWS/ApplicationELB \
+  --statistic Average \
+  --period 60 \
+  --threshold 1 \
+  --comparison-operator GreaterThanOrEqualToThreshold \
+  --evaluation-periods 2 \
+  --region $AWS_REGION
+```
+
+---
+
+## Cleanup
+To remove all AWS resources and avoid charges
+
+
+chmod +x cleanup.sh && ls -lh cleanup.sh
+
+
+OR clean up manually::
+
+```bash
+# Delete ECS service
+aws ecs delete-service \
+  --cluster $CLUSTER_NAME \
+  --service rag-service \
+  --force \
+  --region $AWS_REGION
+
+# Delete ECS cluster
+aws ecs delete-cluster \
+  --cluster $CLUSTER_NAME \
+  --region $AWS_REGION
+
+# Delete ALB
+aws elbv2 delete-load-balancer \
+  --load-balancer-arn $ALB_ARN \
+  --region $AWS_REGION
+
+# Delete target group
+aws elbv2 delete-target-group \
+  --target-group-arn $TG_ARN \
+  --region $AWS_REGION
+
+# Delete RDS instance
+aws rds delete-db-instance \
+  --db-instance-identifier rag-db-instance \
+  --skip-final-snapshot \
+  --region $AWS_REGION
+
+# Delete EC2 instance (Ollama)
+aws ec2 terminate-instances \
+  --instance-ids $INSTANCE_ID \
+  --region $AWS_REGION
+
+# Delete NAT Gateway
+aws ec2 delete-nat-gateway \
+  --nat-gateway-id $NAT_GW_ID \
+  --region $AWS_REGION
+
+# Release Elastic IP
+aws ec2 release-address \
+  --allocation-id $ALLOCATION_ID \
+  --region $AWS_REGION
+
+# Delete Internet Gateway
+aws ec2 detach-internet-gateway \
+  --internet-gateway-id $IGW_ID \
+  --vpc-id $VPC_ID \
+  --region $AWS_REGION
+
+aws ec2 delete-internet-gateway \
+  --internet-gateway-id $IGW_ID \
+  --region $AWS_REGION
+
+# Delete VPC (this will cascade delete subnets and route tables)
+aws ec2 delete-vpc \
+  --vpc-id $VPC_ID \
+  --region $AWS_REGION
+
+# Delete ECR repository
+aws ecr delete-repository \
+  --repository-name $ECR_REPO_NAME \
+  --force \
+  --region $AWS_REGION
+
+# Delete IAM roles
+aws iam detach-role-policy \
+  --role-name rag-ecs-task-execution-role \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+aws iam delete-role-policy \
+  --role-name rag-ecs-task-execution-role \
+  --policy-name ecr-access
+
+aws iam delete-role \
+  --role-name rag-ecs-task-execution-role
+
+aws iam delete-role-policy \
+  --role-name rag-ecs-task-role \
+  --policy-name cloudwatch-logs
+
+aws iam delete-role \
+  --role-name rag-ecs-task-role
+
+# Delete key pair
+aws ec2 delete-key-pair \
+  --key-name rag-ollama-key \
+  --region $AWS_REGION
+```
+
+---
+
+## Summary
+
+You now have a fully functional RAG application deployed on AWS with:
+
+- ✓ VPC with public and private subnets
+- ✓ RDS PostgreSQL with pgvector for vector storage
+- ✓ ECS Fargate running Node.js REST API
+- ✓ Application Load Balancer for traffic distribution
+- ✓ Ollama running on EC2 for LLM and embeddings
+- ✓ CloudWatch logging and monitoring
+- ✓ Auto-scaling configured (optional)
+
+### Next Steps:
+
+1. Add HTTPS/SSL certificates (ACM)
+2. Set up auto-scaling policies
+3. Implement CI/CD pipeline with CodePipeline
+4. Add database backups and multi-AZ failover
+5. Implement API authentication and rate limiting
+6. Set up custom domain name (Route 53)
+7. Implement caching (ElastiCache)
+
+---
+
+## Troubleshooting
+
+### Common Issues:
+
+**ECS tasks not starting**
+```bash
+aws ecs describe-tasks \
+  --cluster $CLUSTER_NAME \
+  --tasks $(aws ecs list-tasks --cluster $CLUSTER_NAME --query taskArns --output text) \
+  --region $AWS_REGION
+```
+
+**RDS connection issues**
+```bash
+# Check security groups allow Fargate→RDS traffic
+aws ec2 describe-security-groups --group-ids $SG_FARGATE --region $AWS_REGION
+aws ec2 describe-security-groups --group-ids $SG_RDS --region $AWS_REGION
+```
+
+**Ollama unreachable**
+```bash
+# SSH into Ollama EC2 and check service
+ssh -i ~/.ssh/rag-ollama-key.pem ubuntu@$INSTANCE_IP
+sudo systemctl status ollama
+curl http://localhost:11434/api/version
+```
+
+**Logs not appearing in CloudWatch**
+```bash
+# Verify task execution role has CloudWatch permissions
+aws iam get-role-policy --role-name rag-ecs-task-role --policy-name cloudwatch-logs
+```

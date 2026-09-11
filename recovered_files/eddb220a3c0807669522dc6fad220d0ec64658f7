@@ -1,0 +1,45 @@
+# RAG Application Configuration for AWS Deployment
+# Copy this to .env and fill in the actual values from your AWS resources
+
+# Application Settings
+NODE_ENV=production
+API_PORT=3000
+LOG_LEVEL=info
+
+# Vector Store Configuration
+VECTOR_STORE=vectorDB
+# Options: 'inMemory' or 'vectorDB'
+
+# Ollama Configuration (for LLM and Embeddings)
+# Update with your Ollama EC2 instance private IP or Bedrock endpoint
+OLLAMA_BASE_URL=http://<OLLAMA_EC2_PRIVATE_IP>:11434
+OLLAMA_MODEL=llama3
+OLLAMA_EMBEDDING_MODEL=nomic-embed-text
+OLLAMA_TEMPERATURE=0.7
+
+# PostgreSQL / RDS Configuration
+DB_HOST=<RDS_ENDPOINT>.rds.amazonaws.com
+DB_PORT=5432
+DB_USER=postgres
+DB_PASSWORD=<SECURE_PASSWORD>
+DB_NAME=vectordb
+DB_MAX_CONNECTIONS=10
+DB_CONNECTION_TIMEOUT=5000
+
+# LangChain Configuration (if using langchain-rag.js)
+LANGCHAIN_MODEL=llama3
+LANGCHAIN_EMBEDDING_MODEL=nomic-embed-text
+LANGCHAIN_TEMPERATURE=0.7
+LANGCHAIN_TOP_K=2
+LANGCHAIN_CHUNK_SIZE=1000
+LANGCHAIN_CHUNK_OVERLAP=200
+
+# AWS Configuration (if using AWS services like Bedrock)
+# AWS_REGION=us-east-1
+# AWS_BEDROCK_MODEL_ID=anthropic.claude-v2
+# AWS_ACCESS_KEY_ID=<Your AWS Access Key>
+# AWS_SECRET_ACCESS_KEY=<Your AWS Secret Key>
+
+# Monitoring and Logging
+ENABLE_CLOUDWATCH_LOGS=true
+LOG_FORMAT=json

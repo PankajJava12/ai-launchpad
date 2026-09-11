@@ -1,0 +1,34 @@
+import dotenv from 'dotenv'
+import { vectorDBStore } from '../embeddings/vectorDB.js'
+
+// Load environment variables
+dotenv.config()
+
+async function seed() {
+  console.log(`[${new Date().toISOString()}] Starting document seeding...`)
+  console.log(`[${new Date().toISOString()}] Database: ${process.env.DB_HOST}:${process.env.DB_PORT}/${process.env.DB_NAME}`)
+
+  try {
+    // Initialize with AWS credentials if provided
+    if (process.env.DB_HOST && process.env.DB_USER) {
+      vectorDBStore.init(
+        process.env.DB_HOST,
+        parseInt(process.env.DB_PORT || '5432'),
+        process.env.DB_USER,
+        process.env.DB_PASSWORD,
+        process.env.DB_NAME
+      )
+    }
+
+    console.log(`[${new Date().toISOString()}] Indexing documents...`)
+    await vectorDBStore.indexDocuments()
+
+    console.log(`[${new Date().toISOString()}] ✓ Seeding complete!`)
+    process.exit(0)
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] ✗ Seeding failed:`, error)
+    process.exit(1)
+  }
+}
+
+seed()

@@ -1,0 +1,178 @@
+Using nomic-embed-text with Ollama + pgvector
+
+
+The key idea: never store full documents as one vector.
+Instead store chunks of documents.
+
+Architecture:
+```
+documents
+   ↓
+chunks
+   ↓
+embeddings
+```
+This improves retrieval accuracy and scalability.
+
+
+1️⃣ Embedding dimension for nomic model
+
+nomic-embed-text produces:
+`768 dimensional vectors`
+
+So pgvector column will be:
+`VECTOR(768)`
+
+2️⃣ Database schema (production style)
+Documents table
+Stores metadata about the original document.
+```
+CREATE TABLE documents (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  title TEXT,
+  source TEXT,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+Example:
+```
+Life Insurance Policy
+Health Policy Terms
+Critical Illness Guide
+```
+
+Chunks table
+Stores pieces of documents.
+```
+CREATE TABLE chunks (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  document_id UUID REFERENCES documents(id) ON DELETE CASCADE,
+  chunk_index INT,
+  content TEXT
+);
+```
+
+Example document chunking:
+
+```
+Doc: Life Insurance Policy
+
+Chunk 1 → intro
+Chunk 2 → coverage
+Chunk 3 → exclusions
+Chunk 4 → claims
+```
+
+
+Embeddings table
+
+Stores the vector.
+```
+CREATE TABLE embeddings (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  chunk_id UUID REFERENCES chunks(id) ON DELETE CASCADE,
+  embedding VECTOR(768)
+);
+```
+
+3️⃣ Index for fast similarity search
+
+Without index → slow after 100k rows.
+
+Create index:
+
+CREATE INDEX embeddings_vector_idx
+ON embeddings
+USING ivfflat (embedding vector_cosine_ops)
+WITH (lists = 100);
+
+Then run:
+
+ANALYZE embeddings;
+
+4️⃣ Query for semantic search
+When user asks a question:
+
+"Does life insurance cover cancer?"
+
+Steps:
+
+1️⃣ Embed the question
+Using nomic model.
+
+2️⃣ Query pgvector
+SELECT
+  c.content,
+  d.title
+FROM embeddings e
+JOIN chunks c ON e.chunk_id = c.id
+JOIN documents d ON c.document_id = d.id
+ORDER BY e.embedding <-> $1
+LIMIT 5;
+
+$1 = query embedding.
+
+This returns top-5 relevant chunks.
+
+5️⃣ Send context to LLM
+
+Node.js example:
+
+const context = rows
+  .map(r => r.content)
+  .join("\n\n");
+
+Prompt:
+
+Use this context to answer:
+
+${context}
+
+Question:
+${userQuestion}
+6️⃣ Chunking strategy (important)
+
+Best chunk size:
+
+300–500 tokens
+
+Overlap:
+
+50 tokens
+
+Example:
+
+Chunk1: tokens 1–400
+Chunk2: tokens 350–750
+Chunk3: tokens 700–1100
+
+Overlap helps preserve context.
+
+
+
+Your RAG pipeline will look like:
+```
+User Question
+      ↓
+Ollama Embedding (nomic)
+      ↓
+pgvector similarity search
+      ↓
+Top 5 chunks
+      ↓
+LLM prompt
+      ↓
+Answer
+```
+
+Scaling limits
+pgvector works well for:
+
+Vectors	    Performance
+10K	        instant
+100K	    very fast
+1M	        good
+10M	        still usable
+
+Beyond that you may move to a dedicated vector DB.

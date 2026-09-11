@@ -1,0 +1,4 @@
+.node_modules
+.RAG/node_modules
+.RAG/pg-vector/postgres-data
+

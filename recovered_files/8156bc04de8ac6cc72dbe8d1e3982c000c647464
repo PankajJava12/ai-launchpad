@@ -1,0 +1,73 @@
+Plan: Deploy RAG Application to AWS ECS Fargate
+TL;DR
+Deploy your Node.js RAG app to AWS ECS Fargate (managed containers) with a REST API, backed by RDS PostgreSQL + pgvector, and Ollama on a separate EC2 instance (or switch to AWS Bedrock). Covers full AWS infrastructure setup, code changes, containerization, and deployment.
+
+Steps (8 Phases)
+Phase 1: AWS Infrastructure Setup
+
+Create VPC, subnets, Internet Gateway, NAT Gateway
+Create Security Groups (Ollama, RDS, Fargate, ALB)
+Create RDS PostgreSQL with pgvector extension
+Create IAM roles for ECS & EC2
+Create Application Load Balancer (ALB)
+Phase 2: Code Modifications
+6. Update config to use environment variables (not hardcoded)
+7. Convert rag.js to Express.js REST API with POST /api/ask and GET /health endpoints
+8. Create Dockerfile for Node.js app
+9. Create docker-compose-aws.yml for local testing
+
+Phase 3: Container Registry
+10. Create AWS ECR repository
+11. Build & push Docker image to ECR
+
+Phase 4: Ollama Deployment (Choose A or B)
+
+Option A (EC2): Launch Ubuntu instance, install Ollama, pull models
+Option B (Bedrock): Use AWS Bedrock API instead (simpler, serverless)
+Phase 5: ECS Cluster & Service
+14. Create ECS cluster with Fargate
+15. Create ECS task definition pointing to ECR image + RDS/Ollama config
+16. Create ECS service with 2+ tasks, attach to ALB
+
+Phase 6: Database Initialization
+17. Enable pgvector extension in RDS, create tables
+18. Seed initial documents (policy.txt, annuity.txt) via seeding script
+
+Phase 7: Testing & Validation
+19. Local Docker testing with docker-compose
+20. Deploy to ECS, test health endpoint
+21. End-to-end test: Question → Embedding → Search → LLM → Answer
+
+Phase 8: Monitoring
+22. Set up CloudWatch dashboards & alarms
+23. Configure auto-scaling (optional)
+24. Set up CI/CD pipeline (optional)
+
+Key Files to Create/Modify
+server.js (new) — Express REST API
+rag.js — Refactor to read env vars, expose functions
+Dockerfile (new) — Container image
+docker-compose-aws.yml (new) — Local test stack
+package.json — Add Express dependency
+.env.aws (new) — AWS credentials & endpoints
+Verification Checklist
+✓ Local Docker build succeeds
+✓ docker-compose-aws.yml runs locally
+✓ AWS VPC, security groups, RDS, ECR created
+✓ ECR image pushed & pulls successfully
+✓ ECS tasks reach RUNNING state
+✓ ALB health checks pass
+✓ /health endpoint returns {"status":"ok"}
+✓ /api/ask returns answers with context
+
+Decisions Made
+ECS Fargate (serverless containers) over EC2 for simplicity
+RDS PostgreSQL (managed) over embedding DB in container
+Ollama EC2 or Bedrock — both detailed, your choice
+REST API instead of CLI for broader usability
+Optimized for development/low-traffic (<100 req/day)
+Further Considerations
+Ollama Performance: CPU (t3.xlarge, ~$30/mo, 5-30s latency) vs GPU (g4dn.xlarge, ~$100+/mo, 0.5-5s latency) — which latency is acceptable?
+Database HA: Single-AZ (dev, cheaper) vs Multi-AZ (prod, resilient) — start simple?
+Cost: Enable Spot instances for 70% savings on Fargate (acceptable for dev)?
+Document Updates: Static reference docs or frequently changing? Affects seeding strategy.

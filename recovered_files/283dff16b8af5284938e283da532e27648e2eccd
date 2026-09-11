@@ -1,0 +1,48 @@
+Project Structure
+rag
+ ├ rag.js (workflow without any framwork)
+ └ docs
+     ├ policy.txt
+     └ annuity.txt
+
+
+
+RAG Architecture with AI Models
+
+Documents (e.g. policy.txt, annuity.txt)
+   ↓
+Embedding (nomic-embed-text)
+   ↓
+Vector store (memory)
+   ↓
+User question
+   ↓
+Embedding
+   ↓
+Cosine similarity search
+   ↓
+Top documents (Relevant Context)
+   ↓
+Llama3 LLM (I am taking ollama's free LLM model-llama3)
+   ↓
+Answer
+
+
+
+RAG Architecture
+
+![alt text](image.png)
+
+
+
+Checking embedding works:
+curl -X POST http://localhost:11434/api/embed \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "nomic-embed-text",
+    "input": [
+      "First sentence",
+      "Second sentence",
+      "Third sentence"
+    ]
+  }'

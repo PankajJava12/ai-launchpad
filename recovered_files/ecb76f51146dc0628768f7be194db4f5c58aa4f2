@@ -1,0 +1,30 @@
+Created langchain-rag.js
+Key Features:
+
+LangChain Components:
+
+OllamaEmbeddings - For generating embeddings using Ollama's nomic-embed-text model
+Ollama LLM - For generating responses using llama3
+RecursiveCharacterTextSplitter - For intelligent document chunking (1000 chars with 200 char overlap)
+MemoryVectorStore - For in-memory vector storage
+RetrievalQAChain - For creating an end-to-end QA pipeline
+Key Improvements Over Original:
+
+Automatic document chunking using LangChain's text splitter
+Cleaner chain-based architecture
+Built-in support for source document tracking
+Customizable prompt templates
+Better error handling and logging
+Workflow:
+
+Initializes LangChain components (embeddings & LLM)
+Loads all documents from embeddings/docs
+Splits documents into manageable chunks
+Creates a vector store from chunks
+Sets up a QA chain with custom prompting
+Executes queries and returns answers with source documents
+Updated package.json with LangChain dependencies:
+
+@langchain/community - Community integrations
+@langchain/core - Core LangChain components
+langchain - Main library

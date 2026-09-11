@@ -1,0 +1,157 @@
+import { GoogleGenerativeAI } from "@google/generative-ai"
+import axios from "axios"
+
+const genAI = new GoogleGenerativeAI('AIzaSyDVEC7FFWQw22HPoldRL_NHZD-bhlhW7KY');
+
+const model = genAI.getGenerativeModel({
+  model: "gemini-2.5-flash",
+  systemInstruction: `
+You are an autonomous AI agent.
+
+Your job is to achieve the user's goal step by step.
+
+You can use tools.
+
+Available tools:
+- get_weather
+- calculate
+
+When you want to use a tool return JSON:
+
+{
+ "action": "tool_name",
+ "input": { ... }
+}
+
+Example:
+
+{
+ "action": "get_weather",
+ "input": { "city": "Pune" }
+}
+
+When the task is complete return:
+
+{
+ "action": "finish",
+ "answer": "final answer"
+}
+`
+})
+
+/*
+--------------------------------
+TOOLS
+--------------------------------
+*/
+
+async function get_weather(city) {
+
+  const geo = await axios.get(
+    `https://geocoding-api.open-meteo.com/v1/search?name=${city}`
+  )
+
+  const { latitude, longitude } = geo.data.results[0]
+
+  const weather = await axios.get(
+    `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current_weather=true`
+  )
+
+  return weather.data.current_weather
+}
+
+async function calculate(expression) {
+  return eval(expression)
+}
+
+/*
+--------------------------------
+TOOL REGISTRY
+--------------------------------
+*/
+
+const tools = {
+  get_weather,
+  calculate
+}
+
+/*
+--------------------------------
+AGENT LOOP
+--------------------------------
+*/
+
+async function runAgent(goal) {
+
+  let history = []
+
+  for (let step = 0; step < 10; step++) {
+
+    const contents = [
+      {
+        role: "user",
+        parts: [{ text: `Goal: ${goal}` }]
+      },
+      ...history
+    ]
+
+    const result = await model.generateContent({
+      contents
+    })
+
+    const message =
+      result.response.candidates[0].content.parts[0].text
+
+    console.log("\nLLM Response:")
+    console.log(message)
+
+    let action
+
+    try {
+      action = JSON.parse(message)
+    } catch {
+      console.log("Invalid JSON")
+      break
+    }
+
+    if (action.action === "finish") {
+
+      console.log("\nFINAL ANSWER:\n")
+      console.log(action.answer)
+      break
+    }
+
+    const tool = tools[action.action]
+
+    if (!tool) {
+      console.log("Unknown tool:", action.action)
+      break
+    }
+
+    const resultTool = await tool(...Object.values(action.input))
+
+    console.log("\nTool Result:", resultTool)
+
+    history.push({
+      role: "model",
+      parts: [{ text: message }]
+    })
+
+    history.push({
+      role: "user",
+      parts: [
+        { text: `Observation: ${JSON.stringify(resultTool)}` }
+      ]
+    })
+  }
+}
+
+/*
+--------------------------------
+RUN
+--------------------------------
+*/
+
+runAgent(
+  "Tell me the weather in Pune and convert temperature to Fahrenheit"
+)

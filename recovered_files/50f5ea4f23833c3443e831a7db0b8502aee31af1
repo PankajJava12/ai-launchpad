@@ -1,0 +1,29 @@
+We will build a mini autonomous agent (AutoGPT-style) where the LLM can:
+
+• plan steps
+• choose tools
+• observe results
+• decide the next step
+• stop when the goal is complete
+
+This is the reason → act → observe loop used in most modern agent systems.
+
+Autonomous Agent Architecture
+
+Think of it like this:
+
+User Goal
+   ↓
+LLM Planner
+   ↓
+Choose Action (tool)
+   ↓
+Execute Tool
+   ↓
+Observation
+   ↓
+LLM decides next step
+   ↓
+Repeat until done
+
+This loop is the core of AutoGPT, LangGraph agents, OpenAI agents, etc.
