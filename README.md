@@ -13,7 +13,7 @@ AI Launchpad is an experimental platform designed to serve as a launching pad fo
 **This repository contains highly sensitive information.** Users are strongly advised to avoid cloning, downloading, or extracting files from this repository without proper security precautions.
 
 **Critical Issues Found:**
-- **Secret Keys:** The repository contains exposed API keys, including an **OpenRouter API Key**, which poses a significant security risk.
+- **Secret Keys:** The repository contains exposed API keys, including an **OR API Key**, which poses a significant security risk.
 - **Personal Data:** Several files contain personal contact details such as phone numbers and email addresses.
 
 **Recommended Action:**
